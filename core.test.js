@@ -6,6 +6,7 @@ import {
   mimeForTranscription,
   parseClock,
   parseTranslationResult,
+  extractModelText,
   parseVtt,
   plainText,
   safeFilename,
@@ -82,6 +83,21 @@ test("remaps translated rows by order when a model changes segment ids", () => {
 test("accepts plain translated text for a single-segment fallback", () => {
   const mapping = parseTranslationResult({ response: "هذه ترجمة احتياطية." }, [11]);
   assert.equal(mapping.get(11), "هذه ترجمة احتياطية.");
+});
+
+test("extracts text from Cloudflare and OpenAI-compatible response shapes", () => {
+  assert.equal(
+    extractModelText({ choices: [{ message: { content: "ترجمة" } }] }),
+    "ترجمة",
+  );
+  assert.equal(
+    extractModelText({ output: [{ type: "output_text", text: "نص احتياطي" }] }),
+    "نص احتياطي",
+  );
+  assert.equal(
+    extractModelText({ response: { segments: [{ id: 1, translation: "منظم" }] } }),
+    '{"segments":[{"id":1,"translation":"منظم"}]}',
+  );
 });
 
 test("rejects missing translated segments", () => {
