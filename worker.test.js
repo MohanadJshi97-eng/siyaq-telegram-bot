@@ -21,7 +21,7 @@ test("reports the cloud edition health and version", async () => {
   assert.deepEqual(data, {
     ok: true,
     service: "SIYAQ | سياق",
-    version: "0.4.0",
+    version: "0.4.1",
     mode: "cloudflare-workers-ai",
   });
 });
