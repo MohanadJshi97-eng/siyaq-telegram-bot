@@ -59,7 +59,7 @@ test("reports the cloud edition health, version, and admin configuration", async
   assert.deepEqual(data, {
     ok: true,
     service: "SIYAQ | سياق",
-    version: "0.5.0",
+    version: "0.5.1",
     mode: "cloudflare-workers-ai",
     adminConfigured: true,
   });
@@ -160,6 +160,24 @@ test("tracks users and lets an admin inspect, ban, unban, and cancel", async () 
 
   const unban = await state.fetch(stateRequest("/admin/unban", { targetUserId: "654321" }));
   assert.deepEqual(await unban.json(), { changed: true });
+});
+
+test("claims exactly one durable administrator", async () => {
+  const storage = new MemoryStorage();
+  const state = new SiyaqState({ storage }, {});
+
+  const first = await state.fetch(stateRequest("/admin/claim", { userId: "385255528" }));
+  assert.deepEqual(await first.json(), { ok: true, already: false });
+
+  const check = await state.fetch(stateRequest("/admin/is-admin", { userId: "385255528" }));
+  assert.deepEqual(await check.json(), { admin: true });
+
+  const repeated = await state.fetch(stateRequest("/admin/claim", { userId: "385255528" }));
+  assert.deepEqual(await repeated.json(), { ok: true, already: true });
+
+  const rejected = await state.fetch(stateRequest("/admin/claim", { userId: "999999999" }));
+  assert.equal(rejected.status, 200);
+  assert.deepEqual(await rejected.json(), { ok: false, reason: "already_claimed" });
 });
 
 test("bypasses application quota reservations for an admin job", async () => {

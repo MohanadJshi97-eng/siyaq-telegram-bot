@@ -21,6 +21,7 @@ import {
 const TELEGRAM_API = "https://api.telegram.org";
 const DEFAULT_TRANSLATION_MODEL = "@cf/qwen/qwen3-30b-a3b-fp8";
 const DEFAULT_TRANSLATION_FALLBACK_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+const BOOTSTRAP_ADMIN_TOKEN_DIGEST = "6b353d1078e8c413674e5f0697f64d8603e3a058e51fcf85b9240d5be84c65d1";
 const BOT_COMMANDS = [
   { command: "start", description: "بدء استخدام سياق" },
   { command: "help", description: "عرض الأوامر" },
@@ -79,12 +80,14 @@ function adminIds(env) {
   );
 }
 
-function isAdmin(env, userId) {
-  return adminIds(env).has(String(userId));
+async function isAdmin(env, userId) {
+  if (adminIds(env).has(String(userId))) return true;
+  const result = await stateCall(env, "/admin/is-admin", { userId: String(userId) });
+  return result.admin === true;
 }
 
-function isAuthorized(env, userId) {
-  return enabled(env.ALLOW_ALL_USERS) || adminIds(env).has(String(userId));
+async function isAuthorized(env, userId) {
+  return enabled(env.ALLOW_ALL_USERS) || (await isAdmin(env, userId));
 }
 
 function modeLabel(mode) {
@@ -122,6 +125,13 @@ async function derivedWebhookSecret(env) {
   let binary = "";
   for (const byte of digest) binary += String.fromCharCode(byte);
   return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+}
+
+async function sha256Hex(value) {
+  const digest = new Uint8Array(
+    await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(value || ""))),
+  );
+  return [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function setupPage({ state, title, message, action = "" }) {
@@ -180,6 +190,13 @@ async function configureTelegram(request, env) {
         : "رفض Telegram التوكن أو تعذر الوصول إليه. تحقق من أن التوكن الحالي مأخوذ من BotFather ثم أعد النشر.",
     });
   }
+}
+
+async function setAdminCommandsForChat(env, chatId) {
+  return telegram(env, "setMyCommands", {
+    commands: [...BOT_COMMANDS, ADMIN_COMMAND],
+    scope: { type: "chat", chat_id: Number(chatId) },
+  });
 }
 
 async function telegram(env, method, payload, form = null) {
@@ -307,7 +324,7 @@ function displayUser(profile) {
 async function handleAdminCommand(env, message, args) {
   const adminUserId = String(message.from.id);
   const chatId = message.chat.id;
-  if (!isAdmin(env, adminUserId)) {
+  if (!(await isAdmin(env, adminUserId))) {
     await sendMessage(env, chatId, "هذا الأمر مخصص لمدير البوت فقط.");
     return true;
   }
@@ -357,7 +374,7 @@ async function handleAdminCommand(env, message, args) {
   }
 
   if (action === "ban") {
-    if (isAdmin(env, targetUserId)) {
+    if (await isAdmin(env, targetUserId)) {
       await sendMessage(env, chatId, "لا يمكن حظر حساب إداري.");
       return true;
     }
@@ -394,10 +411,43 @@ async function handleAdminCommand(env, message, args) {
   return true;
 }
 
+async function handleAdminClaim(env, message, token) {
+  const userId = String(message.from.id);
+  const chatId = message.chat.id;
+  if (message.chat.type !== "private" || String(chatId) !== userId) {
+    await sendMessage(env, chatId, "نفّذ أمر تفعيل الإدارة داخل المحادثة الخاصة مع البوت فقط.");
+    return true;
+  }
+
+  const suppliedDigest = await sha256Hex(token);
+  if (!secureEqual(suppliedDigest, BOOTSTRAP_ADMIN_TOKEN_DIGEST)) {
+    await sendMessage(env, chatId, "رمز تفعيل الإدارة غير صحيح.");
+    return true;
+  }
+
+  const result = await stateCall(env, "/admin/claim", { userId });
+  if (!result.ok) {
+    await sendMessage(env, chatId, "تم تفعيل مدير آخر مسبقًا، لذلك أُغلق رمز التفعيل نهائيًا.");
+    return true;
+  }
+
+  await setAdminCommandsForChat(env, chatId).catch((error) => {
+    console.warn("Could not set admin command menu", safeDiagnostic(error));
+  });
+  await sendMessage(
+    env,
+    chatId,
+    result.already
+      ? "👑 حسابك مفعّل كمدير بالفعل. استخدم /admin لفتح لوحة الإدارة."
+      : "✅ تم تفعيل حسابك مديرًا كامل الصلاحيات 👑\n\nاستخدم /admin لفتح لوحة الإدارة، و/start لتحديث شاشة الترحيب.",
+  );
+  return true;
+}
+
 async function handleCommand(env, message, parsed) {
   const userId = String(message.from.id);
   const chatId = message.chat.id;
-  const admin = isAdmin(env, userId);
+  const admin = await isAdmin(env, userId);
   const prefs = await stateCall(env, "/prefs/get", {
     userId,
     defaultMode: env.DEFAULT_TRANSLATION_MODE || "professional",
@@ -556,7 +606,7 @@ async function handleCommand(env, message, parsed) {
 async function enqueueMedia(env, message, media) {
   const chatId = message.chat.id;
   const userId = String(message.from.id);
-  const admin = isAdmin(env, userId);
+  const admin = await isAdmin(env, userId);
   if (media.unsupported) {
     await sendMessage(env, chatId, "هذا المستند ليس ملفًا صوتيًا أو مرئيًا مدعومًا.");
     return;
@@ -646,7 +696,7 @@ async function handleTelegramUpdate(env, update) {
 
   const message = update?.message;
   if (!message?.chat?.id || !message?.from?.id) return;
-  const admin = isAdmin(env, message.from.id);
+  const admin = await isAdmin(env, message.from.id);
   const profile = await stateCall(env, "/users/touch", {
     userId: String(message.from.id),
     chatId: String(message.chat.id),
@@ -658,12 +708,16 @@ async function handleTelegramUpdate(env, update) {
     await sendMessage(env, message.chat.id, "هذا الحساب محظور من استخدام البوت. راجع مدير الخدمة.");
     return;
   }
-  if (!isAuthorized(env, message.from.id)) {
+  const parsed = commandParts(message.text);
+  if (parsed?.command === "claimadmin") {
+    await handleAdminClaim(env, message, parsed.args);
+    return;
+  }
+  if (!(await isAuthorized(env, message.from.id))) {
     await replyUnauthorized(env, message);
     return;
   }
 
-  const parsed = commandParts(message.text);
   if (parsed && (await handleCommand(env, message, parsed))) return;
   const media = mediaFromMessage(message);
   if (media) {
@@ -1131,6 +1185,24 @@ export class SiyaqState {
       return this.json({ ...profile, banned: Boolean(await this.storage.get(`banned:${userId}`)) });
     }
 
+    if (path === "/admin/is-admin") {
+      return this.json({ admin: Boolean(await this.storage.get(`admin:${userId}`)) });
+    }
+
+    if (path === "/admin/configured") {
+      return this.json({ configured: Boolean(await this.storage.get("admin:bootstrap-user")) });
+    }
+
+    if (path === "/admin/claim") {
+      const claimedUserId = String((await this.storage.get("admin:bootstrap-user")) || "");
+      if (claimedUserId && claimedUserId !== userId) {
+        return this.json({ ok: false, reason: "already_claimed" });
+      }
+      await this.storage.put("admin:bootstrap-user", userId);
+      await this.storage.put(`admin:${userId}`, true);
+      return this.json({ ok: true, already: claimedUserId === userId });
+    }
+
     if (path === "/admin/stats") {
       const [users, bans, jobs] = await Promise.all([
         this.storage.list({ prefix: "user:" }),
@@ -1346,12 +1418,13 @@ export default {
   async fetch(request, env, context) {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/health") {
+      const storedAdmin = await stateCall(env, "/admin/configured", {}).catch(() => ({ configured: false }));
       return Response.json({
         ok: true,
         service: "SIYAQ | سياق",
-        version: "0.5.0",
+        version: "0.5.1",
         mode: "cloudflare-workers-ai",
-        adminConfigured: adminIds(env).size > 0,
+        adminConfigured: adminIds(env).size > 0 || storedAdmin.configured === true,
       });
     }
     if (request.method === "GET" && url.pathname === "/") {
