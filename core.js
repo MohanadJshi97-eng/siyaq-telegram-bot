@@ -154,10 +154,41 @@ function stripModelWrappers(value) {
 export function extractModelText(result) {
   if (typeof result === "string") return result;
   if (!result || typeof result !== "object") return "";
-  if (typeof result.response === "string") return result.response;
-  if (result.response && typeof result.response === "object") return JSON.stringify(result.response);
-  const choice = result.choices?.[0];
-  return choice?.message?.content ?? choice?.text ?? result.text ?? "";
+
+  const candidates = [
+    result.response,
+    result.choices?.[0]?.message?.content,
+    result.choices?.[0]?.text,
+    result.output_text,
+    result.outputText,
+    result.generated_text,
+    result.text,
+    result.output,
+    result.result?.response,
+    result.result?.choices?.[0]?.message?.content,
+    result.result?.output_text,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim()) return candidate;
+    if (Array.isArray(candidate)) {
+      const joined = candidate
+        .map((item) =>
+          typeof item === "string"
+            ? item
+            : typeof item?.text === "string"
+              ? item.text
+              : typeof item?.content === "string"
+                ? item.content
+                : "",
+        )
+        .filter(Boolean)
+        .join("\n")
+        .trim();
+      if (joined) return joined;
+    }
+    if (candidate && typeof candidate === "object") return JSON.stringify(candidate);
+  }
+  return "";
 }
 
 export function parseTranslationResult(result, expectedIds) {
