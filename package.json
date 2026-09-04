@@ -25,6 +25,9 @@
     "bindings": {
       "TELEGRAM_BOT_TOKEN": {
         "description": "Paste the current token from @BotFather. Cloudflare stores it as an encrypted Worker secret; it is never committed to GitHub."
+      },
+      "ADMIN_USER_IDS": {
+        "description": "Your numeric Telegram user ID. It grants the private SIYAQ admin role and must not be committed to the public repository."
       }
     }
   }

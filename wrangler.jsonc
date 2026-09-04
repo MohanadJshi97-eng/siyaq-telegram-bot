@@ -5,6 +5,7 @@
   "compatibility_date": "2026-09-03",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
+  "keep_vars": true,
   "ai": {
     "binding": "AI"
   },
@@ -41,7 +42,6 @@
   },
   "vars": {
     "ALLOW_ALL_USERS": "true",
-    "ADMIN_USER_IDS": "",
     "DEFAULT_TARGET_LANGUAGE": "Arabic",
     "DEFAULT_TRANSLATION_MODE": "professional",
     "MAX_FILE_MB": "18",
