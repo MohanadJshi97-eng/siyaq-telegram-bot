@@ -41,6 +41,18 @@ const STATUS_LABELS = {
 
 class PermanentJobError extends Error {}
 
+function safeDiagnostic(error) {
+  const name = String(error?.name || "Error").replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 40) || "Error";
+  const message = String(error?.message || error || "UNKNOWN_ERROR")
+    .replace(/https:\/\/api\.telegram\.org\/(?:file\/)?bot[^/\s]+/gi, "https://api.telegram.org/bot[redacted]")
+    .replace(/\b\d{5,}:[A-Za-z0-9_-]{20,}\b/g, "[redacted-token]")
+    .replace(/[A-Za-z0-9+\/_=-]{80,}/g, "[redacted-data]")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 260);
+  return `${name}: ${message || "UNKNOWN_ERROR"}`;
+}
+
 function envNumber(env, key, fallback, minimum, maximum) {
   return clampNumber(env[key], fallback, minimum, maximum);
 }
@@ -636,6 +648,28 @@ async function downloadTelegramFile(env, job) {
   return bytes;
 }
 
+async function transcribeAudio(env, bytes, mediaType) {
+  const workersai = createWorkersAI({ binding: env.AI });
+  const configuredModel = env.TRANSCRIPTION_MODEL || "@cf/openai/whisper-large-v3-turbo";
+  const modelIds = [...new Set([configuredModel, "@cf/openai/whisper"])] ;
+  let lastError = null;
+
+  for (const modelId of modelIds) {
+    try {
+      return await transcribe({
+        model: workersai.transcription(modelId),
+        audio: bytes,
+        mediaType,
+      });
+    } catch (error) {
+      lastError = error;
+      console.warn("SIYAQ transcription attempt failed", modelId, safeDiagnostic(error));
+    }
+  }
+
+  throw lastError || new Error("TRANSCRIPTION_FAILED");
+}
+
 async function processJob(env, job) {
   const record = await stateCall(env, "/jobs/get", { jobId: job.id });
   if (record.job?.status === "cancel_requested") {
@@ -649,8 +683,10 @@ async function processJob(env, job) {
     return;
   }
 
+  job.processingStage = "بدء المعالجة";
   await stateCall(env, "/jobs/update", { jobId: job.id, status: "processing" });
   await safeEditMessage(env, job.chatId, job.statusMessageId, "⬇️ أستقبل الملف وأتحقق منه...");
+  job.processingStage = "تنزيل الملف من تلغرام";
   const bytes = await downloadTelegramFile(env, job);
 
   const afterDownload = await stateCall(env, "/jobs/get", { jobId: job.id });
@@ -662,15 +698,12 @@ async function processJob(env, job) {
     job.statusMessageId,
     "🎙️ أفرّغ الكلام بلغته الأصلية مع التوقيت...",
   );
-  const workersai = createWorkersAI({ binding: env.AI });
-  const transcription = await transcribe({
-    model: workersai.transcription(
-      env.TRANSCRIPTION_MODEL || "@cf/openai/whisper-large-v3-turbo",
-      { vad_filter: true },
-    ),
-    audio: bytes,
-    mediaType: mimeForTranscription(job.mimeType, job.fileName),
-  });
+  job.processingStage = "تفريغ الصوت";
+  const transcription = await transcribeAudio(
+    env,
+    bytes,
+    mimeForTranscription(job.mimeType, job.fileName),
+  );
   const blocks = transcriptionToBlocks(
     { text: transcription.text, segments: transcription.segments },
     job.durationSeconds,
@@ -683,6 +716,7 @@ async function processJob(env, job) {
   }
 
   const sourceLanguage = transcription.language || "auto";
+  job.processingStage = "ترجمة النص";
   await translateBlocks(env, blocks, { ...job, sourceLanguage });
 
   const translated = plainText(blocks, true);
@@ -695,6 +729,7 @@ async function processJob(env, job) {
     job.statusMessageId,
     "📦 اكتملت الترجمة، وأجهز الملفات الآن...",
   );
+  job.processingStage = "إرسال النتائج";
   for (const chunk of splitTelegramText(translated)) {
     await sendMessage(env, job.chatId, chunk);
   }
@@ -735,6 +770,7 @@ async function handleQueue(batch, env) {
     } catch (error) {
       console.error("SIYAQ job failed", job?.id, error);
       const text = readableError(error);
+      const diagnostic = `المرحلة: ${job?.processingStage || "غير محددة"}\nالتفاصيل: ${safeDiagnostic(error)}`;
       await stateCall(env, "/jobs/update", {
         jobId: job.id,
         status: text === "تم إلغاء المهمة" ? "cancelled" : "failed",
@@ -745,7 +781,12 @@ async function handleQueue(batch, env) {
         jobId: job.id,
         seconds: job.reservedSeconds,
       }).catch(() => null);
-      await safeEditMessage(env, job.chatId, job.statusMessageId, `❌ تعذرت معالجة الملف\n\n${text}`);
+      await safeEditMessage(
+        env,
+        job.chatId,
+        job.statusMessageId,
+        `❌ تعذرت معالجة الملف\n\n${text}\n\n🔧 تشخيص آمن\n${diagnostic}`,
+      );
       message.ack();
     }
   }
