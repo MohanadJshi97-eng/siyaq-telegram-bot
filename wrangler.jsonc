@@ -1,0 +1,60 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "siyaq-telegram-bot",
+  "main": "index.js",
+  "compatibility_date": "2026-09-03",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "ai": {
+    "binding": "AI"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "STATE",
+        "class_name": "SiyaqState"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["SiyaqState"]
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "JOBS",
+        "queue": "siyaq-jobs"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "siyaq-jobs",
+        "max_batch_size": 1,
+        "max_batch_timeout": 1,
+        "max_retries": 2,
+        "dead_letter_queue": "siyaq-dead-jobs"
+      }
+    ]
+  },
+  "vars": {
+    "ALLOW_ALL_USERS": "true",
+    "ADMIN_USER_IDS": "385255528",
+    "DEFAULT_TARGET_LANGUAGE": "Arabic",
+    "DEFAULT_TRANSLATION_MODE": "professional",
+    "MAX_FILE_MB": "18",
+    "MAX_MEDIA_SECONDS": "900",
+    "DAILY_USER_SECONDS": "1200",
+    "DAILY_GLOBAL_SECONDS": "10800",
+    "TRANSCRIPTION_MODEL": "@cf/openai/whisper-large-v3-turbo",
+    "TRANSLATION_MODEL": "@cf/qwen/qwen3-30b-a3b-fp8",
+    "TRANSLATION_BATCH_SIZE": "12",
+    "QA_ENABLED": "true"
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 0.1
+  }
+}

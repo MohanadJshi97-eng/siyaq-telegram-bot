@@ -1,0 +1,31 @@
+{
+  "name": "siyaq-telegram-bot",
+  "version": "0.4.0",
+  "private": true,
+  "type": "module",
+  "description": "Public Telegram transcription and professional translation bot on Cloudflare Workers AI",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "test": "node --test",
+    "check": "node --check core.js && node --check index.js && node --test",
+    "cf:dry-run": "wrangler deploy --dry-run"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "ai": "7.0.92",
+    "workers-ai-provider": "4.0.0"
+  },
+  "devDependencies": {
+    "wrangler": "4.129.0"
+  },
+  "cloudflare": {
+    "bindings": {
+      "TELEGRAM_BOT_TOKEN": {
+        "description": "Paste the current token from @BotFather. Cloudflare stores it as an encrypted Worker secret; it is never committed to GitHub."
+      }
+    }
+  }
+}
