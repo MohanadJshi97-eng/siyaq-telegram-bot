@@ -178,10 +178,24 @@ export function parseTranslationResult(result, expectedIds) {
   }
 
   const mapping = new Map();
-  const rows = Array.isArray(payload?.segments) ? payload.segments : [];
+  let rows = Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload?.segments)
+      ? payload.segments
+      : Array.isArray(payload?.translations)
+        ? payload.translations
+        : [];
+  if (!rows.length && payload && typeof payload === "object" && !Array.isArray(payload)) {
+    const numericEntries = Object.entries(payload).filter(([key]) => /^\d+$/.test(key));
+    if (numericEntries.length) {
+      rows = numericEntries.map(([id, translation]) => ({ id, translation }));
+    }
+  }
   for (const row of rows) {
-    const id = Number(row?.id);
-    const translation = String(row?.translation ?? row?.text ?? "").trim();
+    const id = Number(row?.id ?? row?.segment_id ?? row?.segmentId);
+    const translation = String(
+      row?.translation ?? row?.translated_text ?? row?.translatedText ?? row?.target ?? row?.text ?? "",
+    ).trim();
     if (Number.isInteger(id) && translation) mapping.set(id, translation);
   }
 
@@ -193,10 +207,31 @@ export function parseTranslationResult(result, expectedIds) {
   }
 
   const expected = expectedIds.map(Number);
-  if (mapping.size !== expected.length || expected.some((id) => !mapping.has(id))) {
-    throw new Error("TRANSLATION_MAPPING_MISMATCH");
+  if (mapping.size === expected.length && expected.every((id) => mapping.has(id))) {
+    return mapping;
   }
-  return mapping;
+
+  const orderedTranslations = rows
+    .map((row) =>
+      String(
+        row?.translation ?? row?.translated_text ?? row?.translatedText ?? row?.target ?? row?.text ?? "",
+      ).trim(),
+    )
+    .filter(Boolean);
+  if (orderedTranslations.length === expected.length) {
+    return new Map(expected.map((id, index) => [id, orderedTranslations[index]]));
+  }
+
+  if (expected.length === 1) {
+    if (mapping.size === 1) return new Map([[expected[0], [...mapping.values()][0]]]);
+    const direct = String(typeof payload === "string" ? payload : raw)
+      .replace(/^\s*(?:\d+\s*(?:\t|\||:|—|-)\s*)?/, "")
+      .replace(/^(["'])|(["'])$/g, "")
+      .trim();
+    if (direct) return new Map([[expected[0], direct]]);
+  }
+
+  throw new Error(`TRANSLATION_MAPPING_MISMATCH expected=${expected.length} received=${mapping.size}`);
 }
 
 export function plainText(blocks, translated = true) {
