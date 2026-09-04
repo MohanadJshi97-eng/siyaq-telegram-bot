@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import worker, { SiyaqState } from "./index.js";
+import worker, { runTranslationModel, SiyaqState } from "./index.js";
 
 class MemoryStorage {
   constructor() {
@@ -47,9 +47,34 @@ test("reports the cloud edition health and version", async () => {
   assert.deepEqual(data, {
     ok: true,
     service: "SIYAQ | سياق",
-    version: "0.4.3",
+    version: "0.4.4",
     mode: "cloudflare-workers-ai",
   });
+});
+
+test("uses a structured fallback model when the primary translation is empty", async () => {
+  const calls = [];
+  const env = {
+    AI: {
+      async run(modelId, request) {
+        calls.push({ modelId, request });
+        if (modelId.includes("qwen")) return { response: "" };
+        return { response: { segments: [{ id: 1, translation: "مرحبًا بالعالم" }] } };
+      },
+    },
+  };
+
+  const mapping = await runTranslationModel(
+    env,
+    "Translate faithfully.",
+    { segments_to_translate: [{ id: 1, source: "Hello world" }] },
+    [1],
+  );
+
+  assert.equal(mapping.get(1), "مرحبًا بالعالم");
+  assert.equal(calls.filter((call) => call.modelId.includes("qwen")).length, 2);
+  const fallback = calls.find((call) => call.modelId.includes("llama-3.3-70b"));
+  assert.equal(fallback.request.response_format.type, "json_schema");
 });
 
 test("clears a stuck cancellation before accepting another job", async () => {
