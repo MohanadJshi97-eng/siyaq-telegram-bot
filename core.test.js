@@ -71,6 +71,19 @@ test("accepts a numbered-line translation fallback", () => {
   assert.equal(mapping.get(2), "اثنان");
 });
 
+test("remaps translated rows by order when a model changes segment ids", () => {
+  const mapping = parseTranslationResult(
+    { response: '{"segments":[{"id":0,"translation":"واحد"},{"id":1,"translation":"اثنان"}]}' },
+    [7, 8],
+  );
+  assert.deepEqual([...mapping.entries()], [[7, "واحد"], [8, "اثنان"]]);
+});
+
+test("accepts plain translated text for a single-segment fallback", () => {
+  const mapping = parseTranslationResult({ response: "هذه ترجمة احتياطية." }, [11]);
+  assert.equal(mapping.get(11), "هذه ترجمة احتياطية.");
+});
+
 test("rejects missing translated segments", () => {
   assert.throws(
     () => parseTranslationResult({ response: '{"segments":[{"id":1,"translation":"واحد"}]}' }, [1, 2]),
