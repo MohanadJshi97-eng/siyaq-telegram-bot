@@ -59,7 +59,7 @@ test("reports the cloud edition health, version, and admin configuration", async
   assert.deepEqual(data, {
     ok: true,
     service: "SIYAQ | سياق",
-    version: "0.5.1",
+    version: "0.6.0",
     mode: "cloudflare-workers-ai",
     adminConfigured: true,
   });
@@ -71,7 +71,7 @@ test("uses a structured fallback model when the primary translation is empty", a
     AI: {
       async run(modelId, request) {
         calls.push({ modelId, request });
-        if (modelId.includes("qwen")) return { response: "" };
+        if (modelId.includes("glm-4.7")) return { response: "" };
         return { response: { segments: [{ id: 1, translation: "مرحبًا بالعالم" }] } };
       },
     },
@@ -85,9 +85,37 @@ test("uses a structured fallback model when the primary translation is empty", a
   );
 
   assert.equal(mapping.get(1), "مرحبًا بالعالم");
-  assert.equal(calls.filter((call) => call.modelId.includes("qwen")).length, 2);
-  const fallback = calls.find((call) => call.modelId.includes("llama-3.3-70b"));
+  assert.equal(calls.filter((call) => call.modelId.includes("glm-4.7")).length, 2);
+  const fallback = calls.find((call) => call.modelId.includes("qwen3-30b"));
   assert.equal(fallback.request.response_format.type, "json_schema");
+});
+
+test("supports a dedicated structured editorial review model", async () => {
+  const calls = [];
+  const env = {
+    AI: {
+      async run(modelId, request) {
+        calls.push({ modelId, request });
+        return { choices: [{ message: { content: '{"segments":[{"id":1,"translation":"صياغة عربية طبيعية"}]}' } }] };
+      },
+    },
+  };
+
+  const mapping = await runTranslationModel(
+    env,
+    "Edit the translation.",
+    { segments: [{ id: 1, source: "Stay ahead of this", draft: "في المقدمة من هذا" }] },
+    [1],
+    {
+      primaryModel: "@cf/openai/gpt-oss-120b",
+      fallbackModel: "@cf/zai-org/glm-4.7-flash",
+      structured: true,
+    },
+  );
+
+  assert.equal(mapping.get(1), "صياغة عربية طبيعية");
+  assert.equal(calls[0].modelId, "@cf/openai/gpt-oss-120b");
+  assert.equal(calls[0].request.response_format.type, "json_schema");
 });
 
 test("clears a stuck cancellation before accepting another job", async () => {

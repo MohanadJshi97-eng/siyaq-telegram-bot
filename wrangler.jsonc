@@ -49,9 +49,10 @@
     "DAILY_USER_SECONDS": "1200",
     "DAILY_GLOBAL_SECONDS": "10800",
     "TRANSCRIPTION_MODEL": "@cf/openai/whisper-large-v3-turbo",
-    "TRANSLATION_MODEL": "@cf/qwen/qwen3-30b-a3b-fp8",
-    "TRANSLATION_FALLBACK_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-    "TRANSLATION_BATCH_SIZE": "12",
+    "TRANSLATION_MODEL": "@cf/zai-org/glm-4.7-flash",
+    "TRANSLATION_REVIEW_MODEL": "@cf/openai/gpt-oss-120b",
+    "TRANSLATION_FALLBACK_MODEL": "@cf/qwen/qwen3-30b-a3b-fp8",
+    "TRANSLATION_BATCH_SIZE": "20",
     "QA_ENABLED": "true"
   },
   "observability": {
