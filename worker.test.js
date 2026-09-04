@@ -19,6 +19,14 @@ class MemoryStorage {
   async delete(key) {
     return this.values.delete(key);
   }
+
+  async list({ prefix = "" } = {}) {
+    return new Map(
+      [...this.values.entries()]
+        .filter(([key]) => key.startsWith(prefix))
+        .sort(([left], [right]) => left.localeCompare(right)),
+    );
+  }
 }
 
 function stateRequest(path, body) {
@@ -40,15 +48,20 @@ test("serves the one-click setup landing page without exposing secrets", async (
   assert.doesNotMatch(html, /TELEGRAM_BOT_TOKEN/);
 });
 
-test("reports the cloud edition health and version", async () => {
-  const response = await worker.fetch(new Request("https://siyaq.example/health"), {}, {});
+test("reports the cloud edition health, version, and admin configuration", async () => {
+  const response = await worker.fetch(
+    new Request("https://siyaq.example/health"),
+    { ADMIN_USER_IDS: "123456" },
+    {},
+  );
   const data = await response.json();
 
   assert.deepEqual(data, {
     ok: true,
     service: "SIYAQ | سياق",
-    version: "0.4.4",
+    version: "0.5.0",
     mode: "cloudflare-workers-ai",
+    adminConfigured: true,
   });
 });
 
@@ -111,6 +124,58 @@ test("cancel releases quota and no longer blocks a new upload", async () => {
   const active = await state.fetch(stateRequest("/jobs/active", { userId: "123" }));
   assert.deepEqual(await active.json(), { job: null, recovered: true });
   assert.equal((await storage.get("job:job-2")).status, "cancelled");
+});
+
+test("tracks users and lets an admin inspect, ban, unban, and cancel", async () => {
+  const storage = new MemoryStorage();
+  const state = new SiyaqState({ storage }, {});
+
+  await state.fetch(stateRequest("/users/touch", {
+    userId: "123456",
+    chatId: "123456",
+    username: "owner",
+    firstName: "Owner",
+  }));
+  await state.fetch(stateRequest("/users/touch", {
+    userId: "654321",
+    chatId: "654321",
+    username: "viewer",
+    firstName: "Viewer",
+  }));
+  await storage.put("latest:654321", "job-user");
+  await storage.put("job:job-user", { id: "job-user", userId: "654321", status: "processing" });
+
+  const ban = await state.fetch(stateRequest("/admin/ban", { targetUserId: "654321" }));
+  assert.deepEqual(await ban.json(), { changed: true, cancelled: true, released: false });
+  assert.equal((await storage.get("job:job-user")).status, "cancel_requested");
+
+  const profile = await state.fetch(stateRequest("/admin/user", { targetUserId: "654321" }));
+  assert.equal((await profile.json()).banned, true);
+
+  const stats = await state.fetch(stateRequest("/admin/stats", {}));
+  const dashboard = await stats.json();
+  assert.equal(dashboard.users, 2);
+  assert.equal(dashboard.banned, 1);
+  assert.equal(dashboard.jobs.active, 1);
+
+  const unban = await state.fetch(stateRequest("/admin/unban", { targetUserId: "654321" }));
+  assert.deepEqual(await unban.json(), { changed: true });
+});
+
+test("bypasses application quota reservations for an admin job", async () => {
+  const storage = new MemoryStorage();
+  const state = new SiyaqState({ storage }, {});
+  const response = await state.fetch(stateRequest("/quota/claim", {
+    userId: "123456",
+    jobId: "admin-job",
+    seconds: 900,
+    bypass: true,
+    perUserLimit: 60,
+    globalLimit: 60,
+  }));
+
+  assert.deepEqual(await response.json(), { ok: true, bypassed: true });
+  assert.equal(await storage.get("quota:reservation:admin-job"), undefined);
 });
 
 test("rejects Telegram webhook calls without the derived secret", async () => {

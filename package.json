@@ -1,6 +1,6 @@
 {
-  "name": "siyaq-telegram-bot",
-  "version": "0.4.0",
+  "name": "siyaq-cloudflare-worker",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
   "description": "Public Telegram transcription and professional translation bot on Cloudflare Workers AI",

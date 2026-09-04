@@ -24,6 +24,7 @@ const DEFAULT_TRANSLATION_FALLBACK_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-
 const BOT_COMMANDS = [
   { command: "start", description: "بدء استخدام سياق" },
   { command: "help", description: "عرض الأوامر" },
+  { command: "id", description: "عرض رقم حسابك" },
   { command: "mode", description: "اختيار أسلوب الترجمة" },
   { command: "language", description: "تغيير اللغة المستهدفة" },
   { command: "glossary", description: "إدارة قاموس المصطلحات" },
@@ -32,6 +33,7 @@ const BOT_COMMANDS = [
   { command: "quota", description: "الحصة اليومية المتبقية" },
   { command: "privacy", description: "سياسة الخصوصية" },
 ];
+const ADMIN_COMMAND = { command: "admin", description: "لوحة إدارة سياق" };
 const STATUS_LABELS = {
   queued: "في الانتظار",
   processing: "قيد المعالجة",
@@ -75,6 +77,10 @@ function adminIds(env) {
       .map((item) => item.trim())
       .filter(Boolean),
   );
+}
+
+function isAdmin(env, userId) {
+  return adminIds(env).has(String(userId));
 }
 
 function isAuthorized(env, userId) {
@@ -149,6 +155,13 @@ async function configureTelegram(request, env) {
       allowed_updates: ["message"],
     });
     await telegram(env, "setMyCommands", { commands: BOT_COMMANDS });
+    for (const adminId of adminIds(env)) {
+      if (!/^\d+$/.test(adminId)) continue;
+      await telegram(env, "setMyCommands", {
+        commands: [...BOT_COMMANDS, ADMIN_COMMAND],
+        scope: { type: "chat", chat_id: Number(adminId) },
+      });
+    }
     const username = escapeHtml(bot.username || "SiyaqTranslateBot");
     return setupPage({
       state: "success",
@@ -280,9 +293,111 @@ async function replyUnauthorized(env, message) {
   );
 }
 
+function validTelegramUserId(value) {
+  const id = String(value || "").trim();
+  return /^\d{4,20}$/.test(id) ? id : "";
+}
+
+function displayUser(profile) {
+  const name = [profile?.firstName, profile?.lastName].filter(Boolean).join(" ") || "مستخدم";
+  const username = profile?.username ? ` (@${profile.username})` : "";
+  return `${name}${username} — ${profile?.userId || "غير معروف"}`;
+}
+
+async function handleAdminCommand(env, message, args) {
+  const adminUserId = String(message.from.id);
+  const chatId = message.chat.id;
+  if (!isAdmin(env, adminUserId)) {
+    await sendMessage(env, chatId, "هذا الأمر مخصص لمدير البوت فقط.");
+    return true;
+  }
+
+  const [rawAction = "dashboard", rawTarget = ""] = String(args || "").trim().split(/\s+/, 2);
+  const action = rawAction.toLowerCase();
+  if (["dashboard", "stats", ""].includes(action)) {
+    const result = await stateCall(env, "/admin/stats", {});
+    const jobs = result.jobs || {};
+    await sendMessage(
+      env,
+      chatId,
+      `👑 لوحة إدارة SIYAQ\n\nالمستخدمون: ${result.users || 0}\nالمحظورون: ${result.banned || 0}\nإجمالي المهام: ${result.totalJobs || 0}\nالنشطة الآن: ${jobs.active || 0}\nالمكتملة: ${jobs.completed || 0}\nالفاشلة: ${jobs.failed || 0}\nالملغاة: ${jobs.cancelled || 0}\nاستهلاك اليوم العام: ${Math.floor((result.globalUsedSeconds || 0) / 60)} دقيقة\n\n/admin users — أحدث المستخدمين\n/admin user ID — تفاصيل مستخدم\n/admin ban ID — حظر مستخدم\n/admin unban ID — فك الحظر\n/admin cancel ID — إلغاء مهمته النشطة`,
+    );
+    return true;
+  }
+
+  if (action === "users") {
+    const result = await stateCall(env, "/admin/users", { limit: 15 });
+    const rows = (result.users || []).map(
+      (profile) => `${profile.banned ? "🚫" : "•"} ${displayUser(profile)}`,
+    );
+    await sendMessage(env, chatId, `👥 أحدث المستخدمين\n\n${rows.join("\n") || "لا يوجد مستخدمون مسجلون بعد."}`);
+    return true;
+  }
+
+  const targetUserId = validTelegramUserId(rawTarget);
+  if (!targetUserId) {
+    await sendMessage(env, chatId, "أرسل رقم مستخدم صحيحًا بعد الأمر. مثال: /admin user 123456789");
+    return true;
+  }
+
+  if (action === "user") {
+    const result = await stateCall(env, "/admin/user", { targetUserId });
+    if (!result.profile) {
+      await sendMessage(env, chatId, "لم أجد هذا المستخدم ضمن سجلات البوت.");
+      return true;
+    }
+    const job = result.job;
+    const status = job ? STATUS_LABELS[job.status] || job.status : "لا توجد مهمة";
+    await sendMessage(
+      env,
+      chatId,
+      `👤 ${displayUser(result.profile)}\nالحالة: ${result.banned ? "محظور" : "مسموح"}\nآخر ظهور: ${result.profile.lastSeenAt || "غير معروف"}\nآخر مهمة: ${status}`,
+    );
+    return true;
+  }
+
+  if (action === "ban") {
+    if (isAdmin(env, targetUserId)) {
+      await sendMessage(env, chatId, "لا يمكن حظر حساب إداري.");
+      return true;
+    }
+    const result = await stateCall(env, "/admin/ban", { targetUserId });
+    await sendMessage(
+      env,
+      chatId,
+      result.changed ? `🚫 حُظر المستخدم ${targetUserId} وأُلغيت مهمته النشطة إن وجدت.` : "المستخدم محظور أصلًا.",
+    );
+    return true;
+  }
+
+  if (action === "unban") {
+    const result = await stateCall(env, "/admin/unban", { targetUserId });
+    await sendMessage(
+      env,
+      chatId,
+      result.changed ? `✅ فُك حظر المستخدم ${targetUserId}.` : "المستخدم غير محظور.",
+    );
+    return true;
+  }
+
+  if (action === "cancel") {
+    const result = await stateCall(env, "/admin/cancel-user", { targetUserId });
+    await sendMessage(
+      env,
+      chatId,
+      result.cancelled ? `⛔ أُلغيت مهمة المستخدم ${targetUserId}.` : "لا توجد لهذا المستخدم مهمة نشطة.",
+    );
+    return true;
+  }
+
+  await sendMessage(env, chatId, "الأوامر المتاحة: stats, users, user, ban, unban, cancel");
+  return true;
+}
+
 async function handleCommand(env, message, parsed) {
   const userId = String(message.from.id);
   const chatId = message.chat.id;
+  const admin = isAdmin(env, userId);
   const prefs = await stateCall(env, "/prefs/get", {
     userId,
     defaultMode: env.DEFAULT_TRANSLATION_MODE || "professional",
@@ -293,7 +408,7 @@ async function handleCommand(env, message, parsed) {
     await sendMessage(
       env,
       chatId,
-      `<b>SIYAQ | سياق</b> ☁️\n\nأرسل فيديو أو ملفًا صوتيًا، وسأعيده نصًا مترجمًا باحتراف مع التايم كود.\n\nالنمط: <b>${modeLabel(prefs.mode)}</b>\nاللغة المستهدفة: <b>${escapeHtml(prefs.targetLanguage)}</b>\n\nاستخدم /help لعرض الأوامر.`,
+      `<b>SIYAQ | سياق</b> ☁️${admin ? "\n<b>👑 حساب المدير</b>" : ""}\n\nأرسل فيديو أو ملفًا صوتيًا، وسأعيده نصًا مترجمًا باحتراف مع التايم كود.\n\nالنمط: <b>${modeLabel(prefs.mode)}</b>\nاللغة المستهدفة: <b>${escapeHtml(prefs.targetLanguage)}</b>\n\nاستخدم /help لعرض الأوامر.${admin ? "\nاستخدم /admin لفتح لوحة الإدارة." : ""}`,
       { parse_mode: "HTML" },
     );
     return true;
@@ -303,10 +418,17 @@ async function handleCommand(env, message, parsed) {
     await sendMessage(
       env,
       chatId,
-      "الأوامر:\n\n/mode professional — ترجمة احترافية\n/mode newsroom — أسلوب صحفي\n/mode literal — ترجمة حرفية\n/language Arabic — اللغة المستهدفة\n/glossary add NATO = الناتو\n/glossary list — عرض القاموس\n/status — حالة آخر مهمة\n/cancel — إلغاء المهمة الحالية\n/quota — الحصة اليومية\n/privacy — سياسة الخصوصية\n\nالحد السحابي الحالي: 18 MB و15 دقيقة للملف.",
+      `الأوامر:\n\n/id — عرض رقم حسابك\n/mode professional — ترجمة احترافية\n/mode newsroom — أسلوب صحفي\n/mode literal — ترجمة حرفية\n/language Arabic — اللغة المستهدفة\n/glossary add NATO = الناتو\n/glossary list — عرض القاموس\n/status — حالة آخر مهمة\n/cancel — إلغاء المهمة الحالية\n/quota — الحصة اليومية\n/privacy — سياسة الخصوصية${admin ? "\n/admin — لوحة الإدارة الكاملة" : ""}\n\nالحد السحابي الحالي: 18 MB و15 دقيقة للملف.`,
     );
     return true;
   }
+
+  if (parsed.command === "id") {
+    await sendMessage(env, chatId, `رقم حسابك في Telegram: ${userId}${admin ? "\nالصلاحية: مدير 👑" : "\nالصلاحية: مستخدم"}`);
+    return true;
+  }
+
+  if (parsed.command === "admin") return handleAdminCommand(env, message, parsed.args);
 
   if (parsed.command === "mode") {
     const mode = parsed.args.toLowerCase();
@@ -412,7 +534,9 @@ async function handleCommand(env, message, parsed) {
     await sendMessage(
       env,
       chatId,
-      `حصتك المتبقية اليوم: ${Math.max(0, Math.floor(result.userRemaining / 60))} دقيقة.\nالحصة العامة المتبقية: ${Math.max(0, Math.floor(result.globalRemaining / 60))} دقيقة.`,
+      admin
+        ? `👑 حساب المدير معفى من حصة المستخدم اليومية.\nالحصة العامة المتبقية للمستخدمين: ${Math.max(0, Math.floor(result.globalRemaining / 60))} دقيقة.`
+        : `حصتك المتبقية اليوم: ${Math.max(0, Math.floor(result.userRemaining / 60))} دقيقة.\nالحصة العامة المتبقية: ${Math.max(0, Math.floor(result.globalRemaining / 60))} دقيقة.`,
     );
     return true;
   }
@@ -421,7 +545,7 @@ async function handleCommand(env, message, parsed) {
     await sendMessage(
       env,
       chatId,
-      "الخصوصية:\n\nيصل الملف إلى تلغرام أولًا، ثم يعالجه سياق مؤقتًا عبر Cloudflare Workers AI. لا تُحفظ ملفات الوسائط في قاعدة بيانات سياق، وتبقى الإعدادات والقاموس وحالة المهمة فقط. لا ترسل النسخة السحابية الملفات إلى OpenAI أو Google. راجع المواد الحساسة بشريًا قبل النشر.",
+      "الخصوصية:\n\nيصل الملف إلى تلغرام أولًا، ثم يعالجه سياق مؤقتًا عبر Cloudflare Workers AI. لا تُحفظ ملفات الوسائط في قاعدة بيانات سياق. تُحفظ الإعدادات والقاموس وحالة المهمة، إضافة إلى رقم المستخدم واسمه العام ووقت آخر استخدام لأغراض الإدارة والحماية. لا ترسل النسخة السحابية الملفات إلى OpenAI أو Google. راجع المواد الحساسة بشريًا قبل النشر.",
     );
     return true;
   }
@@ -432,6 +556,7 @@ async function handleCommand(env, message, parsed) {
 async function enqueueMedia(env, message, media) {
   const chatId = message.chat.id;
   const userId = String(message.from.id);
+  const admin = isAdmin(env, userId);
   if (media.unsupported) {
     await sendMessage(env, chatId, "هذا المستند ليس ملفًا صوتيًا أو مرئيًا مدعومًا.");
     return;
@@ -460,6 +585,7 @@ async function enqueueMedia(env, message, media) {
     userId,
     jobId,
     seconds: estimatedSeconds,
+    bypass: admin,
     perUserLimit: envNumber(env, "DAILY_USER_SECONDS", 1200, 60, 86400),
     globalLimit: envNumber(env, "DAILY_GLOBAL_SECONDS", 10800, 60, 86400),
   });
@@ -480,7 +606,7 @@ async function enqueueMedia(env, message, media) {
     statusMessage = await sendMessage(
       env,
       chatId,
-      `🕓 أُضيف الملف إلى قائمة المعالجة.\nالنمط: ${modeLabel(prefs.mode)}`,
+      `${admin ? "👑 أُضيف الملف إلى مسار الإدارة ذي الأولوية." : "🕓 أُضيف الملف إلى قائمة المعالجة."}\nالنمط: ${modeLabel(prefs.mode)}`,
     );
     const job = {
       id: jobId,
@@ -492,14 +618,16 @@ async function enqueueMedia(env, message, media) {
       fileName: media.fileName,
       mimeType: media.mimeType,
       durationSeconds: media.durationSeconds,
-      reservedSeconds: estimatedSeconds,
+      reservedSeconds: quota.bypassed ? 0 : estimatedSeconds,
+      isAdmin: admin,
       mode: prefs.mode,
       targetLanguage: prefs.targetLanguage,
       glossary: glossary.items || {},
       createdAt: new Date().toISOString(),
     };
     await stateCall(env, "/jobs/create", { job });
-    await env.JOBS.send(job);
+    if (admin) await env.JOBS.send(job);
+    else await env.JOBS.send(job, { delaySeconds: 2 });
   } catch (error) {
     await stateCall(env, "/quota/release", { userId, jobId, seconds: estimatedSeconds }).catch(() => null);
     if (statusMessage) {
@@ -518,6 +646,18 @@ async function handleTelegramUpdate(env, update) {
 
   const message = update?.message;
   if (!message?.chat?.id || !message?.from?.id) return;
+  const admin = isAdmin(env, message.from.id);
+  const profile = await stateCall(env, "/users/touch", {
+    userId: String(message.from.id),
+    chatId: String(message.chat.id),
+    username: message.from.username || "",
+    firstName: message.from.first_name || "",
+    lastName: message.from.last_name || "",
+  });
+  if (profile.banned && !admin) {
+    await sendMessage(env, message.chat.id, "هذا الحساب محظور من استخدام البوت. راجع مدير الخدمة.");
+    return;
+  }
   if (!isAuthorized(env, message.from.id)) {
     await replyUnauthorized(env, message);
     return;
@@ -939,6 +1079,26 @@ export class SiyaqState {
     return true;
   }
 
+  async increment(key) {
+    const value = Number((await this.storage.get(key)) || 0) + 1;
+    await this.storage.put(key, value);
+    return value;
+  }
+
+  async cancelLatestForUser(userId) {
+    const id = await this.storage.get(`latest:${userId}`);
+    const key = id ? `job:${id}` : "";
+    const job = key ? await this.storage.get(key) : null;
+    if (!job || ["completed", "failed", "cancelled"].includes(job.status)) {
+      return { cancelled: false };
+    }
+    job.status = "cancel_requested";
+    job.updatedAt = new Date().toISOString();
+    await this.storage.put(key, job);
+    const released = await this.releaseQuotaReservation(id);
+    return { cancelled: true, released };
+  }
+
   async fetch(request) {
     const path = new URL(request.url).pathname;
     const data = await this.body(request);
@@ -951,6 +1111,92 @@ export class SiyaqState {
       recent.push(updateId);
       await this.storage.put("recent-updates", recent.slice(-256));
       return this.json({ ok: true });
+    }
+
+    if (path === "/users/touch") {
+      const key = `user:${userId}`;
+      const existing = await this.storage.get(key);
+      const now = new Date().toISOString();
+      const profile = {
+        userId,
+        chatId: String(data.chatId || existing?.chatId || "").slice(0, 30),
+        username: String(data.username || existing?.username || "").slice(0, 64),
+        firstName: String(data.firstName || existing?.firstName || "").slice(0, 100),
+        lastName: String(data.lastName || existing?.lastName || "").slice(0, 100),
+        firstSeenAt: existing?.firstSeenAt || now,
+        lastSeenAt: now,
+      };
+      await this.storage.put(key, profile);
+      if (!existing) await this.increment("stats:users_total");
+      return this.json({ ...profile, banned: Boolean(await this.storage.get(`banned:${userId}`)) });
+    }
+
+    if (path === "/admin/stats") {
+      const [users, bans, jobs] = await Promise.all([
+        this.storage.list({ prefix: "user:" }),
+        this.storage.list({ prefix: "banned:" }),
+        this.storage.list({ prefix: "job:" }),
+      ]);
+      const currentJobs = [...jobs.values()];
+      const currentStatusCount = (status) => currentJobs.filter((job) => job.status === status).length;
+      return this.json({
+        users: Math.max(users.size, Number((await this.storage.get("stats:users_total")) || 0)),
+        banned: [...bans.values()].filter(Boolean).length,
+        totalJobs: Math.max(currentJobs.length, Number((await this.storage.get("stats:jobs_total")) || 0)),
+        jobs: {
+          active: currentJobs.filter((job) => ["queued", "processing", "retrying", "cancel_requested"].includes(job.status)).length,
+          completed: Math.max(currentStatusCount("completed"), Number((await this.storage.get("stats:jobs:completed")) || 0)),
+          failed: Math.max(currentStatusCount("failed"), Number((await this.storage.get("stats:jobs:failed")) || 0)),
+          cancelled: Math.max(currentStatusCount("cancelled"), Number((await this.storage.get("stats:jobs:cancelled")) || 0)),
+        },
+        globalUsedSeconds: Number((await this.storage.get(`quota:global:${utcDay()}`)) || 0),
+      });
+    }
+
+    if (path === "/admin/users") {
+      const users = await this.storage.list({ prefix: "user:" });
+      const limit = clampNumber(data.limit, 15, 1, 30);
+      const profiles = await Promise.all(
+        [...users.values()]
+          .sort((left, right) => String(right.lastSeenAt).localeCompare(String(left.lastSeenAt)))
+          .slice(0, limit)
+          .map(async (profile) => ({
+            ...profile,
+            banned: Boolean(await this.storage.get(`banned:${profile.userId}`)),
+          })),
+      );
+      return this.json({ users: profiles });
+    }
+
+    if (path === "/admin/user") {
+      const targetUserId = String(data.targetUserId || "");
+      const profile = (await this.storage.get(`user:${targetUserId}`)) || null;
+      const jobId = await this.storage.get(`latest:${targetUserId}`);
+      return this.json({
+        profile,
+        banned: Boolean(await this.storage.get(`banned:${targetUserId}`)),
+        job: jobId ? (await this.storage.get(`job:${jobId}`)) || null : null,
+      });
+    }
+
+    if (path === "/admin/ban") {
+      const targetUserId = String(data.targetUserId || "");
+      const key = `banned:${targetUserId}`;
+      const changed = !(await this.storage.get(key));
+      await this.storage.put(key, true);
+      const cancellation = await this.cancelLatestForUser(targetUserId);
+      return this.json({ changed, ...cancellation });
+    }
+
+    if (path === "/admin/unban") {
+      const key = `banned:${String(data.targetUserId || "")}`;
+      const changed = Boolean(await this.storage.get(key));
+      await this.storage.delete(key);
+      return this.json({ changed });
+    }
+
+    if (path === "/admin/cancel-user") {
+      return this.json(await this.cancelLatestForUser(String(data.targetUserId || "")));
     }
 
     if (path === "/prefs/get") {
@@ -1007,6 +1253,7 @@ export class SiyaqState {
       }
       await this.storage.put(`job:${job.id}`, job);
       await this.storage.put(`latest:${job.userId}`, job.id);
+      await this.increment("stats:jobs_total");
       return this.json({ ok: true });
     }
 
@@ -1014,10 +1261,17 @@ export class SiyaqState {
       const key = `job:${data.jobId}`;
       const job = await this.storage.get(key);
       if (!job) return this.json({ ok: false }, 404);
+      const previousStatus = job.status;
       job.status = data.status || job.status;
       job.error = data.error || null;
       job.updatedAt = new Date().toISOString();
       await this.storage.put(key, job);
+      if (
+        previousStatus !== job.status &&
+        ["completed", "failed", "cancelled"].includes(job.status)
+      ) {
+        await this.increment(`stats:jobs:${job.status}`);
+      }
       return this.json({ ok: true, job });
     }
 
@@ -1037,6 +1291,7 @@ export class SiyaqState {
         job.status = "cancelled";
         job.updatedAt = new Date().toISOString();
         await this.storage.put(`job:${id}`, job);
+        await this.increment("stats:jobs:cancelled");
         await this.releaseQuotaReservation(id);
         return this.json({ job: null, recovered: true });
       }
@@ -1045,17 +1300,7 @@ export class SiyaqState {
     }
 
     if (path === "/jobs/cancel-latest") {
-      const id = await this.storage.get(`latest:${userId}`);
-      const key = id ? `job:${id}` : "";
-      const job = key ? await this.storage.get(key) : null;
-      if (!job || ["completed", "failed", "cancelled"].includes(job.status)) {
-        return this.json({ cancelled: false });
-      }
-      job.status = "cancel_requested";
-      job.updatedAt = new Date().toISOString();
-      await this.storage.put(key, job);
-      const released = await this.releaseQuotaReservation(id);
-      return this.json({ cancelled: true, released });
+      return this.json(await this.cancelLatestForUser(userId));
     }
 
     if (path.startsWith("/quota/")) {
@@ -1074,6 +1319,7 @@ export class SiyaqState {
       }
       if (path === "/quota/claim") {
         const seconds = clampNumber(data.seconds, 300, 1, 900);
+        if (data.bypass === true) return this.json({ ok: true, bypassed: true });
         if (userUsed + seconds > perUserLimit) return this.json({ ok: false, reason: "user" });
         if (globalUsed + seconds > globalLimit) return this.json({ ok: false, reason: "global" });
         await this.storage.put(userKey, userUsed + seconds);
@@ -1103,8 +1349,9 @@ export default {
       return Response.json({
         ok: true,
         service: "SIYAQ | سياق",
-        version: "0.4.4",
+        version: "0.5.0",
         mode: "cloudflare-workers-ai",
+        adminConfigured: adminIds(env).size > 0,
       });
     }
     if (request.method === "GET" && url.pathname === "/") {
