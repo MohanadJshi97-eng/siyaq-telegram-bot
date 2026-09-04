@@ -41,6 +41,10 @@ const STATUS_LABELS = {
 
 class PermanentJobError extends Error {}
 
+function isCancellationState(status) {
+  return status === "cancel_requested" || status === "cancelled";
+}
+
 function safeDiagnostic(error) {
   const name = String(error?.name || "Error").replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 40) || "Error";
   const message = String(error?.message || error || "UNKNOWN_ERROR")
@@ -390,7 +394,7 @@ async function handleCommand(env, message, parsed) {
       env,
       chatId,
       result.cancelled
-        ? "طُلب إلغاء المهمة. سأتوقف عند أول نقطة آمنة."
+        ? "تم إلغاء المهمة، ويمكنك إرسال ملف جديد الآن."
         : "لا توجد مهمة نشطة.",
     );
     return true;
@@ -574,7 +578,7 @@ async function translateBlocks(env, blocks, job) {
   const totalBatches = Math.max(1, Math.ceil(blocks.length / batchSize));
   for (let start = 0, batchNumber = 1; start < blocks.length; start += batchSize, batchNumber += 1) {
     const current = await stateCall(env, "/jobs/get", { jobId: job.id });
-    if (current.job?.status === "cancel_requested") {
+    if (isCancellationState(current.job?.status)) {
       throw new PermanentJobError("تم إلغاء المهمة");
     }
     const batch = blocks.slice(start, start + batchSize);
@@ -604,7 +608,7 @@ async function translateBlocks(env, blocks, job) {
   if (!enabled(env.QA_ENABLED)) return;
   for (let start = 0, batchNumber = 1; start < blocks.length; start += batchSize, batchNumber += 1) {
     const current = await stateCall(env, "/jobs/get", { jobId: job.id });
-    if (current.job?.status === "cancel_requested") {
+    if (isCancellationState(current.job?.status)) {
       throw new PermanentJobError("تم إلغاء المهمة");
     }
     const batch = blocks.slice(start, start + batchSize);
@@ -672,7 +676,7 @@ async function transcribeAudio(env, bytes, mediaType) {
 
 async function processJob(env, job) {
   const record = await stateCall(env, "/jobs/get", { jobId: job.id });
-  if (record.job?.status === "cancel_requested") {
+  if (isCancellationState(record.job?.status)) {
     await stateCall(env, "/jobs/update", { jobId: job.id, status: "cancelled" });
     await stateCall(env, "/quota/release", {
       userId: job.userId,
@@ -690,7 +694,7 @@ async function processJob(env, job) {
   const bytes = await downloadTelegramFile(env, job);
 
   const afterDownload = await stateCall(env, "/jobs/get", { jobId: job.id });
-  if (afterDownload.job?.status === "cancel_requested") throw new PermanentJobError("تم إلغاء المهمة");
+  if (isCancellationState(afterDownload.job?.status)) throw new PermanentJobError("تم إلغاء المهمة");
 
   await safeEditMessage(
     env,
@@ -807,6 +811,20 @@ export class SiyaqState {
     return request.json().catch(() => ({}));
   }
 
+  async releaseQuotaReservation(jobId) {
+    const reservationKey = `quota:reservation:${jobId}`;
+    const reservation = await this.storage.get(reservationKey);
+    if (!reservation) return false;
+    const userKey = `quota:user:${reservation.day}:${reservation.userId}`;
+    const globalKey = `quota:global:${reservation.day}`;
+    const userUsed = Number((await this.storage.get(userKey)) || 0);
+    const globalUsed = Number((await this.storage.get(globalKey)) || 0);
+    await this.storage.put(userKey, Math.max(0, userUsed - reservation.seconds));
+    await this.storage.put(globalKey, Math.max(0, globalUsed - reservation.seconds));
+    await this.storage.delete(reservationKey);
+    return true;
+  }
+
   async fetch(request) {
     const path = new URL(request.url).pathname;
     const data = await this.body(request);
@@ -901,7 +919,14 @@ export class SiyaqState {
     if (path === "/jobs/active") {
       const id = await this.storage.get(`latest:${userId}`);
       const job = id ? await this.storage.get(`job:${id}`) : null;
-      const active = job && ["queued", "processing", "retrying", "cancel_requested"].includes(job.status);
+      if (job?.status === "cancel_requested") {
+        job.status = "cancelled";
+        job.updatedAt = new Date().toISOString();
+        await this.storage.put(`job:${id}`, job);
+        await this.releaseQuotaReservation(id);
+        return this.json({ job: null, recovered: true });
+      }
+      const active = job && ["queued", "processing", "retrying"].includes(job.status);
       return this.json({ job: active ? job : null });
     }
 
@@ -909,13 +934,14 @@ export class SiyaqState {
       const id = await this.storage.get(`latest:${userId}`);
       const key = id ? `job:${id}` : "";
       const job = key ? await this.storage.get(key) : null;
-      if (!job || !["queued", "processing", "retrying"].includes(job.status)) {
+      if (!job || ["completed", "failed", "cancelled"].includes(job.status)) {
         return this.json({ cancelled: false });
       }
       job.status = "cancel_requested";
       job.updatedAt = new Date().toISOString();
       await this.storage.put(key, job);
-      return this.json({ cancelled: true });
+      const released = await this.releaseQuotaReservation(id);
+      return this.json({ cancelled: true, released });
     }
 
     if (path.startsWith("/quota/")) {
@@ -942,17 +968,7 @@ export class SiyaqState {
         return this.json({ ok: true });
       }
       if (path === "/quota/release") {
-        const reservationKey = `quota:reservation:${data.jobId}`;
-        const reservation = await this.storage.get(reservationKey);
-        if (!reservation) return this.json({ ok: true, released: false });
-        const reservedUserKey = `quota:user:${reservation.day}:${reservation.userId}`;
-        const reservedGlobalKey = `quota:global:${reservation.day}`;
-        const reservedUserUsed = Number((await this.storage.get(reservedUserKey)) || 0);
-        const reservedGlobalUsed = Number((await this.storage.get(reservedGlobalKey)) || 0);
-        await this.storage.put(reservedUserKey, Math.max(0, reservedUserUsed - reservation.seconds));
-        await this.storage.put(reservedGlobalKey, Math.max(0, reservedGlobalUsed - reservation.seconds));
-        await this.storage.delete(reservationKey);
-        return this.json({ ok: true, released: true });
+        return this.json({ ok: true, released: await this.releaseQuotaReservation(data.jobId) });
       }
       if (path === "/quota/commit") {
         const reservationKey = `quota:reservation:${data.jobId}`;
@@ -973,7 +989,7 @@ export default {
       return Response.json({
         ok: true,
         service: "SIYAQ | سياق",
-        version: "0.4.1",
+        version: "0.4.2",
         mode: "cloudflare-workers-ai",
       });
     }
